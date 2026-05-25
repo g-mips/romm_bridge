@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "romm_bridge"
+version = "0.1.0"
+description = "A TUI front end that connects to a ROMM server to sync ROMs and ROM metadata with different frontends (like ES-DE)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31.0",
+    "rich>=13.7.0",
+    "textual>=0.50.0",
+]
+
+[dependency-groups]
+dev = [
+    "textual-dev>=1.5.1",
+]
