@@ -14,8 +14,9 @@ import requests
 
 from textual.app import App
 from textual.containers import Container, Vertical, Horizontal
-from textual.widgets import Header, Footer, Label, ListView, DataTable, RichLog, Button
+from textual.widgets import Header, Footer, Label, ListView, ListItem, DataTable, RichLog, Button
 from textual.screen import ModalScreen
+from textual import work
 
 ROMM_BRIDGE_VERSION = "0.0.1"
 
@@ -67,7 +68,9 @@ class RommBridge(App):
 
     BINDINGS = [
         ("q", "quit", "Quit"),
-        ("~", "toggle_log", "System Logs")
+        ("~", "toggle_log", "System Logs"),
+        ("j", "cursor_down", "Move Down"),
+        ("k", "cursor_up", "Move Up"),
     ]
 
     CSS_PATH = "romm_bridge.tcss"
@@ -125,6 +128,53 @@ class RommBridge(App):
 
         self.log_msg(f"Connected to server: [cyan]{self.romm_url}[/]")
 
+        self.fetch_platforms_to_sidebar()
+
+    @work(thread=True)
+    def fetch_platforms_to_sidebar(self) -> None:
+        """Background agent pulling functional slug listings from the server."""
+        try:
+            r = requests.get(f"{self.romm_url}/api/platforms", headers=self.headers, timeout=5)
+            r.raise_for_status()
+
+            sorted_raw = sorted(r.json(), key=lambda x: x.get("fs_slug") or "")
+            self.platforms = {str(p.get("id")): p for p in sorted_raw if p.get("id") is not None}
+
+            def update_ui():
+                p_list = self.query_one("#sidebar-list", ListView)
+
+                for item in p_list.query(ListItem):
+                    item.remove()
+
+                p_list.append(ListItem(Label("All Platforms"), name="all"))
+
+                # Tally up how many times each display name occurs
+                name_counts = {}
+                for p in self.platforms.values():
+                    base_name = p.get("name") or p.get("fs_slug") or "Unknown"
+                    name_counts[base_name] = name_counts.get(base_name, 0) + 1
+
+                # Build the list dynamically
+                for p in self.platforms.values():
+                    fs_slug = p.get("fs_slug")
+                    if not fs_slug:
+                        continue
+
+                    base_name = p.get("name", fs_slug)
+
+                    # If this name exists more than once, append the fs_slug to disambiguate
+                    if name_counts.get(base_name, 0) > 1:
+                        display_name = f"{base_name} ({fs_slug})"
+                    else:
+                        display_name = base_name
+
+                    p_list.append(ListItem(Label(display_name), name=str(p.get("id"))))
+
+            self.call_from_thread(update_ui)
+
+        except Exception as e:
+            self.call_from_thread(self.log_msg, f"[bold red]Failed to fetch platforms from server: {e}[/]")
+
     # ==================== #
     #       Bindings       #
     # ==================== #
@@ -137,6 +187,20 @@ class RommBridge(App):
         else:
             # Otherwise, push it and hand it the persistent log history
             self.push_screen(SystemLogModal(self.system_logs))
+
+    def action_cursor_down(self) -> None:
+        """Routes 'j' keypresses to move the cursor down on the currently focused widget."""
+        focused = self.focused
+        # If the highlighted widget has a native cursor-down method, trigger it!
+        if focused and hasattr(focused, "action_cursor_down"):
+            focused.action_cursor_down()
+
+    def action_cursor_up(self) -> None:
+        """Routes 'k' keypresses to move the cursor up on the currently focused widget."""
+        focused = self.focused
+        # If the highlighted widget has a native cursor-up method, trigger it!
+        if focused and hasattr(focused, "action_cursor_up"):
+            focused.action_cursor_up()
 
     # ==================== #
     #         Misc         #

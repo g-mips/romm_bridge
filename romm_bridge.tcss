@@ -5,7 +5,9 @@
 
 /* Sidebar */
 #platform-sidebar {
-	width: 30;
+	width: auto;
+	min-width: 25;
+	max-width: 45;
 	background: $surface-darken-1;
 	border-right: solid $border;
 	padding: 1;
