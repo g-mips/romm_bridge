@@ -29,3 +29,34 @@
 	border: solid $border;
 	margin-bottom: 1;
 }
+
+/* System Log Modal */
+SystemLogModal {
+	align: center middle;
+}
+
+SystemLogModal > Container {
+	width: auto;
+	height: auto;
+}
+
+SystemLogModal > Container > Horizontal {
+	width: auto;
+	height: auto;
+}
+
+#log-modal-panel {
+	width: 70%;
+	height: 70%;
+	min-width: 60;
+	background: $surface;
+	border: double $accent;
+	padding: 1 2;
+}
+
+#system-rich-log {
+	height: 1fr;
+	border: solid $border;
+	background: $surface-darken-2;
+	margin-bottom: 1;
+}
