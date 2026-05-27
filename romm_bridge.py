@@ -637,8 +637,8 @@ class RommBridge(App):
 
             # Build a global synced_paths lookup safely namespaced by platform
             for p in self.platforms.values():
-                slug = p.get("fs_slug", "")
-                if not slug: continue
+                platform_slug = p.get("fs_slug", "")
+                if not platform_slug: continue
                 self.update_synced_rom_paths(platform_slug)
         else:
             platform_slug = self.platforms[platform_id].get("fs_slug", platform_id)
