@@ -166,6 +166,7 @@ class RommBridge(App):
         ("~", "toggle_log", "System Logs"),
         ("j", "cursor_down", "Move Down"),
         ("k", "cursor_up", "Move Up"),
+        ("m", "toggle_mark", "Mark Range (m...m)"),
         ("s", "show_stats", "Platform Stats")
     ]
 
@@ -207,6 +208,7 @@ class RommBridge(App):
         self.roms_cache = {}
         self.seen_rom_ids = set()
         self.synced_rom_paths = set()
+        self.keyboard_mark_anchor = None
         self.abort_event = threading.Event()
         self.platforms = None
         self.dry_run = False
@@ -488,6 +490,74 @@ class RommBridge(App):
         # If the highlighted widget has a native cursor-up method, trigger it!
         if focused and hasattr(focused, "action_cursor_up"):
             focused.action_cursor_up()
+
+    def _get_row_key_(self, table, index: int):
+        """Maps a row index to its row_key."""
+        try:
+            return table.coordinate_to_cell_key((index, 0)).row_key
+        except Exception:
+            raise AttributeError(f"Unable to resolve row-key reference at index {index}.")
+
+    def action_toggle_mark(self) -> None:
+        """Handles manual m...m block selection ranges via the keyboard."""
+        table = self.query_one("#roms-table", DataTable)
+        current_idx = table.cursor_row
+
+        if current_idx is None or current_idx < 0:
+            return
+
+        try:
+            row_key = self._get_row_key_(table, current_idx)
+            rom_id = row_key.value
+        except Exception as err:
+            self.log_msg(f"[bold red]ERROR targeting current row index:[/] {str(err)}")
+            return
+
+        if not rom_id or rom_id == "loading":
+            return
+
+        # Place anchor and save the index
+        if self.keyboard_mark_anchor is None:
+            self.keyboard_mark_anchor = current_idx
+            self.log_msg(f"Anchor dropped at row {current_idx + 1}. Move cursor with j/k and press 'm' again to fill block.")
+
+            # Place visual anchor indicator in the selection column
+            table.update_cell(row_key, "col_select", Text.from_markup("[yellow]⚓[/]"))
+
+        # Finish selection
+        else:
+            # They could start and end the anchor in either direction,
+            # so just get the min and max from each index.
+            start_idx = min(self.keyboard_mark_anchor, current_idx)
+            end_idx = max(self.keyboard_mark_anchor, current_idx)
+
+            # Read anchor status to decide if we are mass-checking or mass-unchecking
+            try:
+                anchor_key = self._get_row_key_(table, self.keyboard_mark_anchor)
+                mass_selecting = anchor_key.value not in self.selected_roms
+            except Exception:
+                mass_selecting = True
+
+            # Sweep across the rows between both anchors in memory
+            for idx in range(start_idx, end_idx + 1):
+                try:
+                    r_key = self._get_row_key_(table, idx)
+                    r_id = r_key.value
+
+                    if mass_selecting:
+                        self.selected_roms.add(r_id)
+                        marker = "[bold green]✔[/]"
+                    else:
+                        self.selected_roms.discard(r_id)
+                        marker = "  "
+
+                    table.update_cell(r_key, "col_select", Text.from_markup(marker))
+                except Exception as e:
+                    continue
+
+            self.log_msg(f"Committed range block from row {self.keyboard_mark_anchor + 1} to {current_idx + 1}!")
+
+            self.keyboard_mark_anchor = None
 
     def action_show_stats(self) -> None:
         """Calculates and displays a metric summary for the currently selected platform."""
