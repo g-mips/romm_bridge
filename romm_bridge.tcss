@@ -32,22 +32,22 @@
 	margin-bottom: 1;
 }
 
-/* System Log Modal */
-SystemLogModal {
+/* Modals */
+ModalScreen {
 	align: center middle;
 }
 
-SystemLogModal > Container {
+ModalScreen > Container {
 	width: auto;
 	height: auto;
 }
 
-SystemLogModal > Container > Horizontal {
+ModalScreen > Container > Horizontal {
 	width: auto;
 	height: auto;
 }
 
-#log-modal-panel {
+.modal-panel {
 	width: 70%;
 	height: 70%;
 	min-width: 60;
@@ -56,6 +56,7 @@ SystemLogModal > Container > Horizontal {
 	padding: 1 2;
 }
 
+/* System Log Modal */
 #system-rich-log {
 	height: 1fr;
 	border: solid $border;
@@ -65,12 +66,12 @@ SystemLogModal > Container > Horizontal {
 
 /* Filters */
 #media-filter-container {
-        height: auto;
-        margin-bottom: 1;
-        background: $surface-darken-1;
-        border: solid $border;
-        align: center middle;
-        padding: 0 2;
+	height: auto;
+	margin-bottom: 1;
+	background: $surface-darken-1;
+	border: solid $border;
+	align: center middle;
+	padding: 0 2;
 }
 
 #media-filter-container Checkbox {

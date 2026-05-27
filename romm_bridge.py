@@ -14,11 +14,15 @@ import requests
 import json
 import asyncio
 import xml.etree.ElementTree as ET
+import threading
+from datetime import datetime
+import time
+import math
 
 from rich.text import Text
 from textual.app import App
 from textual.containers import Container, Vertical, Horizontal
-from textual.widgets import Header, Footer, Label, ListView, ListItem, DataTable, RichLog, Button
+from textual.widgets import Header, Footer, Label, ListView, ListItem, DataTable, RichLog, Button, Checkbox, Select
 from textual.screen import ModalScreen
 from textual import work, on
 
@@ -52,7 +56,7 @@ class SystemLogModal(ModalScreen):
         self.rich_log = RichLog(id="system-rich-log", highlight=True, markup=True)
 
     def compose(self):
-        with Container(id="log-modal-panel"):
+        with Container(classes="modal-panel"):
             yield self.rich_log
             with Horizontal(id="modal-actions"):
                 yield Button("Close Logs", id="btn-close-log", variant="primary")
@@ -67,6 +71,21 @@ class SystemLogModal(ModalScreen):
 
     def action_close_modal(self) -> None:
         self.dismiss()
+
+
+class SimulationModal(ModalScreen):
+    """Dry run modal"""
+
+    def compose(self) -> ComposeResult:
+        with Container(classes="modal-panel"):
+            yield Label("Calculating metrics and network download size...", id="modal-summary")
+            yield RichLog(id="modal-log", highlight=True, markup=True)
+            with Horizontal(id="modal-actions"):
+                yield Button("Close Preview", id="btn-close-modal", variant="primary")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-close-modal":
+            self.dismiss()
 
 
 class RommBridge(App):
@@ -119,6 +138,12 @@ class RommBridge(App):
         self.roms_cache = {}
         self.seen_rom_ids = set()
         self.synced_rom_paths = set()
+        self.abort_event = threading.Event()
+        self.platforms = None
+        self.dry_run = False
+        self.local_only = False
+        self.total_bytes_to_download = 0
+        self.games_processed_count = 0
 
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         if CACHE_FILE.exists():
@@ -136,7 +161,6 @@ class RommBridge(App):
                 self.cache_complete = False
         else:
             self.cache_complete = False
-
 
     def compose(self):
         """Setups the look and feel of the application"""
@@ -365,7 +389,7 @@ class RommBridge(App):
             self.call_from_thread(lambda: setattr(self, "sub_title", "Cache Up-to-date"))
 
         except Exception as err:
-            self.log_msg(f"Cache Error: {err}", severity="error")
+            self.log_msg(f"Cache Error: {err}")
             self.notify(f"Cache Error: {err}", severity="error")
             self.call_from_thread(lambda: setattr(self, "sub_title", f"Failed to gather ROMs"))
 
@@ -493,6 +517,418 @@ class RommBridge(App):
         if cached_roms:
             # Kick off the async streaming worker instead of blocking the thread!
             self.stream_roms_to_table(str(platform_id), cached_roms)
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        checkbox = event.checkbox
+        if checkbox.id == "chk-dry-run":
+            self.dry_run = checkbox.value
+        elif checkbox.id == "chk-local-only":
+            self.local_only = checkbox.value
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Centralized event routing framework supporting dynamic morphing action buttons."""
+        if not self.selected_platform:
+            return
+
+        btn = event.button
+
+        if str(btn.label) == "Stop":
+            self._stop_button_(btn)
+        elif btn.id == "btn-sync-meta":
+            self._sync_meta_data_button_(btn)
+        elif btn.id == "btn-toggle-all":
+            self._toggle_all_button_()
+
+    def _stop_button_(self, btn) -> None:
+        self.abort_event.set()
+        btn.disabled = True
+
+    def _sync_meta_data_button_(self, btn):
+        # Morph button state into the emergency kill switch
+        btn.label = "Stop"
+        btn.variant = "warning"
+
+        sync_mode = self.query_one("#sync-mode-select", Select).value
+
+        enabled_folders = set()
+        if self.query_one("#chk-sync-covers", Checkbox).value:
+            enabled_folders.add("covers")
+        if self.query_one("#chk-sync-3dboxes", Checkbox).value:
+            enabled_folders.add("3dboxes")
+        if self.query_one("#chk-sync-videos", Checkbox).value:
+            enabled_folders.add("videos")
+        if self.query_one("#chk-sync-titlescreens", Checkbox).value:
+            enabled_folders.add("titlescreens")
+        if self.query_one("#chk-sync-miximages", Checkbox).value:
+            enabled_folders.add("miximages")
+        if self.query_one("#chk-sync-fanart", Checkbox).value:
+            enabled_folders.add("fanart")
+        if self.query_one("#chk-sync-screenshots", Checkbox).value:
+            enabled_folders.add("screenshots")
+        if self.query_one("#chk-sync-backcovers", Checkbox).value:
+            enabled_folders.add("backcovers")
+        if self.query_one("#chk-sync-marquees", Checkbox).value:
+            enabled_folders.add("marquees")
+        if self.query_one("#chk-sync-physicalmedia", Checkbox).value:
+            enabled_folders.add("physicalmedia")
+        if self.query_one("#chk-sync-manuals", Checkbox).value:
+            enabled_folders.add("manuals")
+
+        self.sync_es_metadata(
+            self.selected_platform,
+            sync_mode=sync_mode,
+            allowed_media=list(self.selected_roms),
+            enabled_folders=enabled_folders
+        )
+
+    def set_or_update_tag(self, parent_node, tag_name, text_value, sync_mode):
+        if not text_value: return
+        node = parent_node.find(tag_name)
+        if node is None:
+            ET.SubElement(parent_node, tag_name).text = str(text_value)
+        elif sync_mode == "full" or not node.text:
+            node.text = str(text_value)
+
+    def resolve_remote_size(self, asset_url: str, fallback_bytes: int) -> tuple[int, bool]:
+        try:
+            req_headers = self.headers if self.romm_url in asset_url else {}
+            res = requests.head(asset_url, headers=req_headers, timeout=2.0, allow_redirects=True)
+            if res.status_code == 200 and "Content-Length" in res.headers:
+                return int(res.headers["Content-Length"]), False
+        except Exception:
+            pass
+        return fallback_bytes, True
+
+    def download_media(self, url, target_dir, filename, sync_mode):
+        if not url: return False
+        if url.startswith("/"): url = self.romm_url + url
+        media_path = target_dir / filename
+
+        if sync_mode != "full" and media_path.exists():
+            return True
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            req_headers = {"Authorization": f"Bearer {self.api_key}"} if self.romm_url in url else {}
+            res = requests.get(url, headers=req_headers, stream=True, timeout=10)
+            res.raise_for_status()
+            with open(media_path, 'wb') as f:
+                for chunk in res.iter_content(chunk_size=8192):
+                    if self.abort_event.is_set():
+                        raise InterruptedError("Cancelled")
+                    f.write(chunk)
+            return True
+        except Exception:
+            if media_path.exists(): media_path.unlink()
+            return False
+
+    def remove_games_from_romm_list(self, platform_roms, root, platform_slug):
+        valid_fs_paths = {f"./{rom.get('fs_name')}" for rom in platform_roms if rom.get("fs_name")}
+        valid_filenames = {rom.get('fs_name') for rom in platform_roms if rom.get("fs_name")}
+
+        games_to_remove = [g for g in root.findall('game') if g.find('path') is not None and g.find('path').text not in valid_fs_paths]
+        for game in games_to_remove:
+            root.remove(game)
+
+        cloud_dir = ROM_LIST_DIR / platform_slug
+        if cloud_dir.exists():
+            for fake_file in cloud_dir.iterdir():
+                if fake_file.is_file() and fake_file.name != "systeminfo.txt" and fake_file.name not in valid_filenames:
+                    fake_file.unlink()
+
+    def process_rom(self, rom, root, existing_games, sync_mode, platform_slug, enabled_folders, modal):
+        rom_id = str(rom["id"])
+        game_name = rom.get('name', 'Unknown')
+        es_system = self.transform_romm_name_to_esde_name(platform_slug)
+        es_media_dir = ES_DE_DIR / "downloaded_media" / es_system
+
+        self.update_inline_status(rom_id, "[yellow]Simulating...[/]" if self.dry_run else "[cyan]⌛ Specs...[/]")
+
+        # The bulk rom already holds the full metadata payload!
+        fs_name = rom.get("fs_name", "")
+        fs_path_str = f"./{fs_name}"
+        true_stem = Path(fs_name).stem
+        ss_meta = rom.get("ss_metadata", {}) or {}
+
+        if self.dry_run:
+            self.dry_run_log_msg(f"\n[bold white]Processing Game:[/] {game_name} ({fs_name})")
+
+        if fs_name and not self.dry_run:
+            fake_rom_file = ROM_LIST_DIR / platform_slug / fs_name
+            real_rom_file = ROMS_DIR / platform_slug / fs_name
+            if not fake_rom_file.exists() and not real_rom_file.exists():
+                fake_rom_file.parent.mkdir(parents=True, exist_ok=True)
+                fake_rom_file.touch()
+
+        if fs_path_str in existing_games:
+            game_node = existing_games[fs_path_str]
+        else:
+            game_node = ET.SubElement(root, "game")
+            self.set_or_update_tag(game_node, "path", fs_path_str, sync_mode)
+
+        media_tags_to_strip = ["image", "video", "thumbnail", "marquee", "boxback", "fanart", "miximage", "physicalmedia", "titlescreen", "screenshot", "manual"]
+        for tag_to_strip in media_tags_to_strip:
+            old_node = game_node.find(tag_to_strip)
+            if old_node is not None: game_node.remove(old_node)
+
+        self.set_or_update_tag(game_node, "name", rom.get("name", ""), sync_mode)
+        self.set_or_update_tag(game_node, "desc", rom.get("summary", ""), sync_mode)
+
+        igdb_meta = rom.get("igdb_metadata", {}) or {}
+        metadatum = rom.get("metadatum", {}) or {}
+
+        if igdb_meta and igdb_meta.get("aggregated_rating"):
+            rating_val = float(igdb_meta.get("aggregated_rating")) / 100.0
+            self.set_or_update_tag(game_node, "rating", str(round(rating_val, 2)), sync_mode)
+
+        release_ts = metadatum.get("first_release_date")
+        if release_ts:
+            dt = datetime.fromtimestamp(release_ts / 1000.0)
+            self.set_or_update_tag(game_node, "releasedate", dt.strftime("%Y%m%dT%H%M%S"), sync_mode)
+
+        companies = metadatum.get("companies", [])
+        if companies:
+            self.set_or_update_tag(game_node, "developer", companies[-1] if len(companies) > 1 else companies[0], sync_mode)
+            self.set_or_update_tag(game_node, "publisher", companies[0], sync_mode)
+
+        genres = metadatum.get("genres", [])
+        if genres: self.set_or_update_tag(game_node, "genre", " / ".join(genres), sync_mode)
+        if metadatum.get("player_count"): self.set_or_update_tag(game_node, "players", metadatum.get("player_count"), sync_mode)
+
+        if sync_mode == "structure_only":
+            self.update_inline_status(rom_id, "[green]Indexed[/]")
+            if self.dry_run:
+                self.dry_run_log_msg("  [green]✓ Structural Indexing Mode[/] -> Skipping asset downloading.")
+            else:
+                self.synced_rom_paths.add(f"{platform_slug}:{fs_path_str}")
+            return
+
+        missing_folders = []
+
+        for xml_tag, es_folder, default_ext, friendly_name, path_key, url_key, root_key in self.media_mappings:
+            target_url = self.get_optimal_url(path_key, url_key, root_key, ss_meta, rom)
+
+            if target_url:
+                ext = Path(urllib.parse.urlparse(target_url).path).suffix or default_ext
+                filename = f"{true_stem}{ext}"
+                target_path = es_media_dir / es_folder / filename
+                is_missing = sync_mode == "full" or not target_path.exists()
+
+                if enabled_folders and es_folder not in enabled_folders:
+                    self.dry_run_log_msg(f"  [dim]◯ Skipped[/] -> Folder {es_folder} was not enabled.")
+                    continue
+
+                is_local_source = self.romm_url in target_url
+
+                if self.local_only and is_missing and not is_local_source:
+                    if self.dry_run:
+                        self.dry_run_log_msg(f"  [dim]◯ Skipped[/] -> External asset source for {friendly_name} blocked because it was external from ROMM server ({target_url}).")
+                    continue
+
+                if self.dry_run:
+                    if is_missing:
+                        base_fallback = 4194304 if es_folder == "videos" else 256000
+                        asset_bytes, is_est = self.resolve_remote_size(target_url, base_fallback)
+                        self.total_bytes_to_download += asset_bytes
+
+                        src_type = "Local Romm" if is_local_source else "External"
+                        est_flag = " [dim](est.)[/]" if is_est else ""
+                        self.dry_run_log_msg(f"  [yellow]✕ Missing[/] -> ({src_type}) Would download {friendly_name} ({self.format_size(asset_bytes)}{est_flag})")
+                    else:
+                        self.dry_run_log_msg(f"  [green]✓ Verified[/] -> Local {friendly_name} already exists on disk.")
+                else:
+                    if friendly_name in ("Cover", "Screenshot", "Video"):
+                        src_indicator = "⚡" if is_local_source else "⬇"
+                        self.update_inline_status(rom_id, f"[cyan]{src_indicator} {friendly_name}...[/]")
+
+                    success = self.download_media(target_url, es_media_dir / es_folder, filename, sync_mode)
+                    if success:
+                        self.set_or_update_tag(game_node, xml_tag, f"../../downloaded_media/{es_system}/{es_folder}/{filename}", sync_mode)
+
+                if not target_path.exists():
+                    missing_folders.append(es_folder)
+
+        if not self.dry_run:
+            self.synced_rom_paths.add(fs_path_str)
+            self.missing_media_cache[rom_id] = list(missing_folders)
+
+        if self.dry_run:
+            pass
+        elif sync_mode == "structure_only":
+            pass
+        else:
+            self.update_inline_status(rom_id, "[yellow]Missing Media[/]" if missing_folders else "[green]Fully Synced[/]")
+
+        if self.dry_run:
+            if modal is not None:
+                summary_markup = (
+                    f"[bold]Target Directory:[/] ~/ES-DE/gamelists/{es_system}/gamelist.xml\n"
+                    f"[bold]Queue Count:[/] {self.games_processed_count} Games Selected\n"
+                    f"[bold]Estimated Network Footprint:[/] [bold yellow]{self.format_size(self.total_bytes_to_download)}[/]"
+                )
+                modal_summary = modal.query_one("#modal-summary", Label)
+                self.call_from_thread(modal_summary.update, Text.from_markup(summary_markup))
+
+    # Helper function to update the ROM cell of its status.
+    def update_inline_status(self, r_id: str, markup_text: str):
+        def update_cell():
+            try:
+                table = self.query_one("#roms-table", DataTable)
+                table.update_cell(r_id, "col_meta", Text.from_markup(markup_text))
+            except Exception as e:
+                self.log_msg(f"Could not update the Metadata Status column for rom: {r_id}: {str(e)}")
+        self.call_from_thread(update_cell)
+
+    @work(thread=True)
+    def sync_es_metadata(self, platform_id: int, sync_mode: str = "missing", allowed_media: list | None = None, enabled_folders: set | None = None):
+        """
+        This is the main functions that will get the ROMs synced up with its metadata.
+
+        It will first try to use the local metadata found in the ROMM server itself. If not found, it will use the URLs that ROMM provides.
+
+        NOTE that if those URLs are provided, it will probably be hammering the limits of the API provided.
+        """
+        self.abort_event.clear()
+
+        allowed_media_set = {str(m_id) for m_id in allowed_media}
+
+        platform_slug = self.platforms[platform_id].get("fs_slug", "")
+
+        es_system = self.transform_romm_name_to_esde_name(platform_slug)
+        es_gamelists_dir = ES_DE_DIR / "gamelists" / es_system
+        xml_file_path = es_gamelists_dir / "gamelist.xml"
+
+        if self.dry_run:
+            modal = SimulationModal()
+            self.call_from_thread(self.push_screen, modal)
+            time.sleep(0.1)
+        else:
+            modal = None
+
+        # Print what mode we are in
+        mode_text = "FAST STRUCTURAL" if sync_mode == "structure_only" else ("FULL REFRESH" if sync_mode == "full" else "MISSING ONLY")
+        self.dry_run_log_msg(f"[bold cyan]Starting local-first metadata engine for {platform_slug} ({mode_text})...[/]")
+
+        platform_roms = self.fetch_roms(platform_id, "btn-sync-meta")
+        if platform_roms is None:
+            return
+
+        if xml_file_path.exists():
+            try:
+                root = ET.parse(xml_file_path).getroot()
+            except Exception:
+                root = ET.Element("gameList")
+        else:
+            root = ET.Element("gameList")
+
+        if not self.dry_run:
+            es_gamelists_dir.mkdir(parents=True, exist_ok=True)
+            self.remove_games_from_romm_list(platform_roms, root, platform_slug)
+
+        existing_games = {g.find('path').text: g for g in root.findall('game') if g.find('path') is not None and g.find('path').text}
+
+        self.total_bytes_to_download = 0
+        self.games_processed_count = 0
+
+        for idx, rom in enumerate(platform_roms, start=1):
+            rom_id = str(rom["id"])
+
+            if allowed_media_set and rom_id not in allowed_media_set:
+                continue
+
+            if self.abort_event.is_set():
+                self.dry_run_log_msg("[bold red]Stopping ROM metadata processing.[/]")
+                break
+
+            self.games_processed_count += 1
+            self.process_rom(rom, root, existing_games, sync_mode, platform_slug, enabled_folders, modal)
+
+        ET.indent(root, space="  ", level=0)
+
+        if not self.dry_run:
+            self.dry_run_log_msg("Writing streamlined index tree layout structure...")
+            tree = ET.ElementTree(root)
+            tree.write(xml_file_path, encoding="utf-8", xml_declaration=True)
+            self.dry_run_log_msg(f"[bold green]Success![/] Committed profile data changes safely to {xml_file_path}")
+            if not self.abort_event.is_set():
+                self.selected_roms.clear()
+        else:
+            self.dry_run_log_msg(f"\n[bold green]✔ Simulation Complete![/] Total calculated network bytes: [bold yellow]{self.format_size(self.total_bytes_to_download)}[/]")
+            for r_id in allowed_media_set:
+                self.update_inline_status(r_id, "[yellow]Previewed[/]")
+
+        def restore_sync_ui():
+            sync_btn = self.query_one("#btn-sync-meta", Button)
+            sync_btn.label = "Sync Metadata"
+            sync_btn.variant = "primary"
+            sync_btn.disabled = False
+
+        self.call_from_thread(self.populate_roms, platform_id)
+        self.call_from_thread(restore_sync_ui)
+
+    def fetch_roms(self, platform_id: int, button_id: str = None) -> list | None:
+        """A unified, paginated API engine that safely pulls catalog datasets without locking the UI."""
+
+        # Check if we already have this platform's ROMs in the cache
+        if platform_id in self.roms_cache:
+            self.log_msg("Loading ROM listing from local memory cache")
+            return self.roms_cache[platform_id]
+
+        # Not in the cache, let's get the listing from the ROMM server
+        self.log_msg("Fetching ROM listings from ROMM server...")
+        roms_data = []
+        limit, offset = 1000, 0
+
+        try:
+            while True:
+                params = {"platform_ids": platform_id, "limit": limit, "offset": offset}
+                res = requests.get(f"{self.romm_url}/api/roms", headers=self.headers, params=params, timeout=10)
+                res.raise_for_status()
+
+                data = res.json()
+                items = data.get("items", [])
+                roms_data.extend(items)
+
+                if len(items) < limit:
+                    break
+                offset += limit
+
+            self.log_msg(f"Loaded {len(roms_data)} raw records from server for tracking.")
+
+            # Save the final payload to the cache before returning it
+            self.roms_cache[platform_id] = roms_data
+
+            return roms_data
+
+        except Exception as err:
+            self.log_output(f"[bold red]Failed query catalog sync execution: {err}[/]")
+            # If a button was passed in, automatically restore it so the UI doesn't freeze
+            if button_id:
+                self.call_from_thread(lambda: setattr(self.query_one(f"#{button_id}"), 'disabled', False))
+            return None
+
+    def _toggle_all_button_(self):
+        table = self.query_one("#roms-table", DataTable)
+        visible_row_keys = list(table.rows.keys())
+        visible_ids = {rk.value for rk in visible_row_keys if rk.value and rk.value != "loading"}
+
+        if not visible_ids:
+            return
+
+        if visible_ids.issubset(self.selected_roms):
+            for r_id in visible_ids:
+                self.selected_roms.discard(r_id)
+            mass_selecting = False
+        else:
+            for r_id in visible_ids:
+                self.selected_roms.add(r_id)
+            mass_selecting = True
+
+        for row_key in visible_row_keys:
+            if row_key.value == "loading":
+                continue
+            marker = "[bold green]✔[/]" if mass_selecting else "  "
+            table.update_cell(row_key, "col_select", Text.from_markup(marker))
 
     @work(exclusive=True)
     async def stream_roms_to_table(self, platform_id: str, roms_data: list) -> None:
@@ -671,6 +1107,13 @@ class RommBridge(App):
         if len(self.system_logs) > 1000:
             self.system_logs.pop(0)
 
+    def dry_run_log_msg(self, msg):
+        if self.dry_run:
+            modal_log = self.screen.query_one("#modal-log", RichLog)
+            self.call_from_thread(modal_log.write, msg)
+        else:
+            self.log_msg(msg)
+
     def can_connect(self, url_or_address: str, default_port: int = 80, timeout: int = 3) -> bool:
         """Attempts a rapid TCP handshake to see if the target is alive and listening."""
 
@@ -742,6 +1185,16 @@ class RommBridge(App):
         }
 
         return mapping.get(platform_slug.lower(), platform_slug)
+
+    def format_size(self, size_bytes: int) -> str:
+        """Converts raw numerical bytes into clean human-readable metrics."""
+        if size_bytes == 0:
+            return "0 B"
+        size_name = ("B", "KB", "MB", "GB", "TB")
+        i = int(math.floor(math.log(size_bytes, 1024)))
+        p = math.pow(1024, i)
+        s = round(size_bytes / p, 2)
+        return f"{s} {size_name[i]}"
 
 
 if __name__ == '__main__':
