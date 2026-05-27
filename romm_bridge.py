@@ -20,7 +20,7 @@ from textual.app import App
 from textual.containers import Container, Vertical, Horizontal
 from textual.widgets import Header, Footer, Label, ListView, ListItem, DataTable, RichLog, Button
 from textual.screen import ModalScreen
-from textual import work
+from textual import work, on
 
 ROMM_BRIDGE_VERSION = "0.0.1"
 
@@ -372,7 +372,26 @@ class RommBridge(App):
     #        Events        #
     # ==================== #
 
+    @on(DataTable.RowSelected, "#roms-table")
+    def handle_keyboard_enter(self, event: DataTable.RowSelected) -> None:
+        """Allows standard keyboard 'Enter' or Double-Clicks to toggle single items."""
+        rom_id = event.row_key.value
+        if not rom_id or rom_id == "loading":
+            return
+
+        table = self.query_one("#roms-table", DataTable)
+
+        if rom_id in self.selected_roms:
+            self.selected_roms.remove(rom_id)
+            new_marker = "  "
+        else:
+            self.selected_roms.add(rom_id)
+            new_marker = "[bold green]✔[/]"
+
+        table.update_cell(event.row_key, "col_select", Text.from_markup(new_marker))
+
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        # TODO: This causes on_list_view_selected to be called twice.
         self.on_list_view_selected(event)
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
