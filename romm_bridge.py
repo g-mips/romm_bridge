@@ -422,6 +422,21 @@ class RommBridge(App):
         # TODO: This causes on_list_view_selected to be called twice.
         self.on_list_view_selected(event)
 
+    def update_synced_rom_paths(self, platform_slug):
+        es_system = self.transform_romm_name_to_esde_name(platform_slug)
+        xml_path = ES_DE_DIR / "gamelists" / es_system / "gamelist.xml"
+        if xml_path.exists():
+            try:
+                tree = ET.parse(xml_path)
+                for game in tree.getroot().findall('game'):
+                    path_node = game.find('path')
+                    if path_node is not None and path_node.text:
+                        # Use namespacing here too so append_roms works identically!
+                        self.synced_rom_paths.add(f"{platform_slug}:{path_node.text}")
+            except Exception as e:
+                self.log_msg(f"[bold yellow]Failed to read local XML: {e}[/]")
+                self.notify(f"Failed to read local XML: {e}", severity="error")
+
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Triggers row redrawing when platform is highlighted."""
         if not event.item:
@@ -442,36 +457,11 @@ class RommBridge(App):
             for p in self.platforms.values():
                 slug = p.get("fs_slug", "")
                 if not slug: continue
-                es_sys = self.transform_romm_name_to_esde_name(slug)
-                xml_path = ES_DE_DIR / "gamelists" / es_sys / "gamelist.xml"
-                if xml_path.exists():
-                    try:
-                        tree = ET.parse(xml_path)
-                        for game in tree.getroot().findall('game'):
-                            path_node = game.find('path')
-                            if path_node is not None and path_node.text:
-                                self.synced_rom_paths.add(f"{slug}:{path_node.text}")
-                    except Exception:
-                        self.log_msg(f"[bold yellow]Failed to read local XML: {e}[/]")
-                        self.notify(f"Failed to read local XML: {e}", severity="error")
-
+                self.update_synced_rom_paths(platform_slug)
         else:
             platform_slug = self.platforms[platform_id].get("fs_slug", platform_id)
             self.log_msg(f"Loading platform: [cyan]{platform_slug}[/]")
-
-            es_system = self.transform_romm_name_to_esde_name(platform_slug)
-            xml_path = ES_DE_DIR / "gamelists" / es_system / "gamelist.xml"
-            if xml_path.exists():
-                try:
-                    tree = ET.parse(xml_path)
-                    for game in tree.getroot().findall('game'):
-                        path_node = game.find('path')
-                        if path_node is not None and path_node.text:
-                            # Use namespacing here too so append_roms works identically!
-                            self.synced_rom_paths.add(f"{platform_slug}:{path_node.text}")
-                except Exception as e:
-                    self.log_msg(f"[bold yellow]Failed to read local XML: {e}[/]")
-                    self.notify(f"Failed to read local XML: {e}", severity="error")
+            self.update_synced_rom_paths(platform_slug)
 
         self.populate_roms(platform_id)
 
