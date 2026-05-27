@@ -88,6 +88,43 @@ class SimulationModal(ModalScreen):
             self.dismiss()
 
 
+class RommTable(DataTable):
+    """DataTable that setups up a function for watching hover events."""
+
+    def watch_hover_coordinate(self, value) -> None:
+        """Create a tooltip when hovering over the metadata column."""
+        if not value:
+            self.tooltip = None
+            return
+
+        try:
+            # Translate the raw terminal cursor coordinate into Textual unique layout keys
+            row_key, col_key = self.coordinate_to_cell_key(value)
+
+            # Block if row key is blank or currently printing a loading line
+            if not row_key.value or row_key.value == "loading":
+                self.tooltip = None
+                return
+
+            # TODO: Do I only want to target this type of column? Or do I want to allow hovering on any column?
+            # Target the Metadata Status column cells exclusively
+            if col_key.value == "col_meta":
+                missing_assets = getattr(self.app, "missing_media_cache", {}).get(row_key.value, [])
+
+                if missing_assets:
+                    bullet_list = "\n".join(f" 📦 {asset}" for asset in missing_assets)
+                    self.tooltip = f"[bold yellow]Missing Media Details:[/]\n{bullet_list}"
+                else:
+                    self.tooltip = "[bold green]✨ All assets fully synced on disk![/]"
+            else:
+                # Instantly drop the tooltips if the user hovers over game titles or selection boxes
+                self.tooltip = None
+
+        except Exception:
+            # Catch coordinate out-of-bounds or header selection exceptions silently
+            self.tooltip = None
+
+
 class RommBridge(App):
     """A TUI application used to sync RomM information with different clients."""
 
@@ -172,7 +209,7 @@ class RommBridge(App):
                 yield ListView(id="sidebar-list")
 
             with Vertical(id="platform-info"):
-                yield DataTable(id="roms-table", cursor_type="row")
+                yield RommTable(id="roms-table", cursor_type="row")
 
                 with Horizontal(id="media-filter-container"):
                     yield Checkbox("Covers", id="chk-sync-covers", value=True)
