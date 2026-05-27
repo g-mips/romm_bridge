@@ -1059,7 +1059,7 @@ class RommBridge(App):
             return roms_data
 
         except Exception as err:
-            self.log_output(f"[bold red]Failed query catalog sync execution: {err}[/]")
+            self.log_msg(f"[bold red]Failed query catalog sync execution: {err}[/]")
             # If a button was passed in, automatically restore it so the UI doesn't freeze
             if button_id:
                 self.call_from_thread(lambda: setattr(self.query_one(f"#{button_id}"), 'disabled', False))
