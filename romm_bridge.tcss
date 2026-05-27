@@ -62,3 +62,26 @@ SystemLogModal > Container > Horizontal {
 	background: $surface-darken-2;
 	margin-bottom: 1;
 }
+
+/* Filters */
+#media-filter-container {
+        height: auto;
+        margin-bottom: 1;
+        background: $surface-darken-1;
+        border: solid $border;
+        align: center middle;
+        padding: 0 2;
+}
+
+#media-filter-container Checkbox {
+	margin-right: 4;
+}
+
+/* Buttons */
+.button-group {
+	height: auto;
+}
+
+.button-group Button {
+	margin-right: 1;
+}

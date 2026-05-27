@@ -150,6 +150,34 @@ class RommBridge(App):
             with Vertical(id="platform-info"):
                 yield DataTable(id="roms-table", cursor_type="row")
 
+                with Horizontal(id="media-filter-container"):
+                    yield Checkbox("Covers", id="chk-sync-covers", value=True)
+                    yield Checkbox("3dboxes", id="chk-sync-3dboxes", value=True)
+                    yield Checkbox("Videos", id="chk-sync-videos", value=True)
+                    yield Checkbox("Titlescreens", id="chk-sync-titlescreens", value=True)
+                    yield Checkbox("Miximages", id="chk-sync-miximages", value=True)
+                    yield Checkbox("Fanart", id="chk-sync-fanart", value=True)
+                    yield Checkbox("Screenshots", id="chk-sync-screenshots", value=True)
+                    yield Checkbox("Backcovers", id="chk-sync-backcovers", value=True)
+                    yield Checkbox("Marquees", id="chk-sync-marquees", value=True)
+                    yield Checkbox("Physicalmedia", id="chk-sync-physicalmedia", value=True)
+                    yield Checkbox("Manuals", id="chk-sync-manuals", value=True)
+
+                with Horizontal(classes="button-group"):
+                    yield Button("Sync Metadata", id="btn-sync-meta", variant="primary")
+                    yield Button("Toggle All", id="btn-toggle-all")
+                    yield Select(
+                        options=[
+                            ("Update Missing Only", "missing"),
+                            ("Full Metadata Refresh", "full"),
+                            ("Fast Index (No Media)", "structure_only")],
+                        value="missing",
+                        id="sync-mode-select",
+                        allow_blank=False
+                    )
+                    yield Checkbox("Dry Run", id="chk-dry-run", value=False)
+                    yield Checkbox("Local Only", id="chk-local-only", value=False)
+
         yield Footer()
 
     def on_mount(self) -> None:
