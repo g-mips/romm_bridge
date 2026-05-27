@@ -88,6 +88,37 @@ class SimulationModal(ModalScreen):
             self.dismiss()
 
 
+class StatsModal(ModalScreen):
+    """An overlay panel displaying live metrics for the selected platform."""
+
+    BINDINGS = [
+        ("escape", "close_modal", "Close"),
+        ("s", "close_modal", "Close")
+    ]
+
+    def __init__(self, platform_name: str, stats_markup: str):
+        super().__init__()
+        self.platform_name = platform_name
+        self.stats_markup = stats_markup
+
+    def compose(self):
+        with Container(classes="modal-panel"):
+            yield Label(f"{self.platform_name.upper()} STATS", id="modal-title")
+
+            # Use a standard label with markup=True to render our rich text
+            yield Label(self.stats_markup, markup=True, id="modal-summary")
+
+            with Horizontal(id="modal-actions"):
+                yield Button("Close Dashboard", id="btn-close-stats", variant="primary")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-close-stats":
+            self.dismiss()
+
+    def action_close_modal(self) -> None:
+        self.dismiss()
+
+
 class RommTable(DataTable):
     """DataTable that setups up a function for watching hover events."""
 
@@ -135,6 +166,7 @@ class RommBridge(App):
         ("~", "toggle_log", "System Logs"),
         ("j", "cursor_down", "Move Down"),
         ("k", "cursor_up", "Move Up"),
+        ("s", "show_stats", "Platform Stats")
     ]
 
     CSS_PATH = "romm_bridge.tcss"
@@ -456,6 +488,95 @@ class RommBridge(App):
         # If the highlighted widget has a native cursor-up method, trigger it!
         if focused and hasattr(focused, "action_cursor_up"):
             focused.action_cursor_up()
+
+    def action_show_stats(self) -> None:
+        """Calculates and displays a metric summary for the currently selected platform."""
+        if not self.selected_platform:
+            self.notify("Please select a platform from the sidebar first!", severity="warning")
+            return
+
+        is_all = self.selected_platform == "all"
+
+        # Dynamically fetch our target ROMs and title
+        if is_all:
+            platform_name = "All Platforms"
+            cached_roms = [rom for p_list in self.roms_cache.values() for rom in p_list]
+        else:
+            platform_slug = self.platforms[self.selected_platform].get("fs_slug", "Unknown")
+            platform_name = self.platforms[self.selected_platform].get("name", platform_slug)
+            cached_roms = self.roms_cache.get(str(self.selected_platform), [])
+
+        total_roms = len(cached_roms)
+
+        if total_roms == 0:
+            self.notify(f"No ROMs loaded yet for {platform_name}.", severity="warning")
+            return
+
+        unindexed = 0
+        visible_local = 0
+        visible_cloud = 0
+        hidden = 0
+
+        missing_counts = {friendly_name: 0 for _, _, _, friendly_name, _, _, _ in self.media_mappings}
+
+        local_files_cache = {}
+        ghost_files_cache = {}
+        needed_pids = {str(r.get("platform_id")) for r in cached_roms if r.get("platform_id")}
+
+        for pid in needed_pids:
+            if pid not in self.platforms: continue
+            slug = self.platforms[pid].get("fs_slug")
+            local_files_cache[pid] = self.gather_installed_roms(slug)
+            ghost_files_cache[pid] = self.gather_rom_indicators(slug)
+
+        for rom in cached_roms:
+            fs_name = rom.get("fs_name")
+            p_id = str(rom.get("platform_id"))
+
+            if not fs_name or p_id not in self.platforms:
+                continue
+
+            platform_slug = self.platforms[p_id].get("fs_slug")
+
+            # Tally ES-DE visibility
+            if fs_name in local_files_cache.get(p_id, set()):
+                visible_local += 1
+            elif fs_name in ghost_files_cache.get(p_id, set()):
+                visible_cloud += 1
+            else:
+                hidden += 1
+
+            # Tally unindexed
+            fs_path_str = f"{platform_slug}:./{fs_name}"
+            if fs_path_str not in self.synced_rom_paths:
+                unindexed += 1
+
+            # Tally specific missing metadata
+            rom_id = str(rom["id"])
+            missing_folders_for_rom = self.missing_media_cache.get(rom_id, [])
+
+            for _, es_folder, _, friendly_name, _, _, _ in self.media_mappings:
+                if es_folder in missing_folders_for_rom:
+                    missing_counts[friendly_name] += 1
+
+        # Format the final output markup using Rich text formatting
+        markup = (
+            f"[bold cyan]Total Tracked ROMs:[/] {total_roms}\n"
+            f"[bold cyan]Unindexed in ES-DE:[/] [yellow]{unindexed}[/]\n\n"
+            f"[bold underline]ES-DE Visibility[/]\n"
+            f" 📁 Local (Downloaded): [green]{visible_local}[/]\n"
+            f" ☁️ Cloud (Ghost File): [blue]{visible_cloud}[/]\n"
+            f" 👻 Hidden (Not Synced): [magenta]{hidden}[/]\n\n"
+            f"[bold underline]Missing Metadata Assets[/]\n"
+        )
+
+        for friendly_name, count in missing_counts.items():
+            if count > 0:
+                markup += f" 📦 {friendly_name}: [red]{count}[/]\n"
+            else:
+                markup += f" ✨ {friendly_name}: [green]Perfect![/]\n"
+
+        self.push_screen(StatsModal(platform_name, markup))
 
     # ==================== #
     #        Events        #
