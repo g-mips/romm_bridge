@@ -260,6 +260,8 @@ class RommBridge(App):
                     yield Checkbox("Manuals", id="chk-sync-manuals", value=True)
 
                 with Horizontal(classes="button-group"):
+                    yield Button("Install", id="btn-install", variant="success")
+                    yield Button("Uninstall", id="btn-uninstall", variant="error")
                     yield Button("Sync Metadata", id="btn-sync-meta", variant="primary")
                     yield Button("Generate ES Systems", id="btn-gen-systems")
                     yield Button("Toggle All", id="btn-toggle-all")
@@ -707,6 +709,11 @@ class RommBridge(App):
         if platform_id == "all":
             self.log_msg("Loading platform: [cyan]All Platforms[/]")
 
+            # Disable actions for the global view to prevent accidental mass-syncs
+            self.query_one("#btn-install", Button).disabled = True
+            self.query_one("#btn-uninstall", Button).disabled = True
+            self.query_one("#btn-sync-meta", Button).disabled = True
+
             # Build a global synced_paths lookup safely namespaced by platform
             for p in self.platforms.values():
                 platform_slug = p.get("fs_slug", "")
@@ -770,6 +777,142 @@ class RommBridge(App):
             self._toggle_all_button_()
         elif btn.id == "btn-gen-systems":
             self._generate_es_systems_xml_()
+        else:
+            self._install_buttons_(btn)
+
+    def _install_buttons_(self, btn):
+        if not self.selected_roms:
+            return
+
+        selected_list = list(self.selected_roms)
+
+        if btn.id == "btn-install":
+            # Morph button state into the emergency kill switch
+            btn.label = "Stop"
+            btn.variant = "warning"
+
+            # Disable sibling action choices
+            self.query_one("#btn-sync-meta", Button).disabled = True
+            self.query_one("#btn-uninstall", Button).disabled = True
+
+            self.check_size_and_install(self.selected_platform, selected_list)
+
+        elif btn.id == "btn-uninstall":
+            self.uninstall_roms(self.selected_platform, selected_list)
+
+    @work(thread=True)
+    def check_size_and_install(self, platform_id: str, rom_ids: list) -> None:
+        """Core download queuing agent tracking multi-file installations for formats like PSX (bin/cue)."""
+        self.abort_event.clear()
+
+        platform_slug = self.platforms[platform_id].get("fs_slug", "")
+
+        for r_id in rom_ids:
+            if self.abort_event.is_set():
+                self.notify("[bold red]❌ Installation queue safely stopped by user.[/]", severity="error")
+                break
+
+            if r_id in self.active_downloads:
+                continue
+
+            fs_name = self.current_options.get(r_id, "Unknown Asset")
+
+            # Flip status flag to Downloading and redraw row indicators
+            self.active_downloads.add(r_id)
+            self.call_from_thread(self.populate_roms, platform_id)
+
+            try:
+                self.call_from_thread(self.log_msg, f"Requesting file information regarding ROM id {r_id}")
+
+                # Get the ROM files
+                res_detail = requests.get(f"{self.romm_url}/api/roms/{r_id}", headers=self.headers, timeout=10)
+                res_detail.raise_for_status()
+                rom_detail = res_detail.json()
+
+                rom_files = rom_detail.get("files", [])
+                if not rom_files:
+                    self.notify(f"[bold red]Error: No storage files found on server for ROM ID {r_id}[/]", severity="error")
+                    continue
+
+                game_name = rom_detail.get("name", fs_name)
+
+                # Now let's iterate through each file and download it.
+                for file_item in rom_files:
+                    if self.abort_event.is_set():
+                        raise InterruptedError("Cancelled")
+
+                    file_name = file_item.get("file_name")
+                    if not file_name:
+                        continue
+
+                    target_path = ROMS_DIR / platform_slug / file_name
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    file_id = file_item.get("id")
+
+                    url = f"{self.romm_url}/api/roms/{file_id}/files/content/{file_name}"
+                    self.call_from_thread(self.log_msg, f"==> Downloading file asset: [cyan]{file_name}[/] from {url}")
+
+                    res = requests.get(url, headers=self.headers, stream=True, timeout=30)
+                    res.raise_for_status()
+
+                    with open(target_path, 'wb') as f:
+                        # Random size for chunks
+                        for chunk in res.iter_content(chunk_size=16384):
+                            if self.abort_event.is_set():
+                                raise InterruptedError("Cancelled")
+                            f.write(chunk)
+
+                self.call_from_thread(self.log_msg, f"Successfully deployed game asset: [green]{game_name}[/]")
+
+            except Exception as e:
+                self.notify(f"[bold red]Deployment failed for {fs_name}: {e}[/]", severity="error")
+
+                # Safety Cleanups: If the download fails or gets canceled halfway,
+                # purge any partial track files to avoid corrupted fragments hanging around your system
+                if 'rom_files' in locals():
+                    for file_item in rom_files:
+                        fname = file_item.get("file_name")
+                        if fname:
+                            corrupt_track = ROMS_DIR / platform_slug / fname
+                            if corrupt_track.exists():
+                                corrupt_track.unlink()
+            finally:
+                self.active_downloads.remove(r_id)
+                self.call_from_thread(self.populate_roms, platform_id)
+
+        def restore_install_ui():
+            install_btn = self.query_one("#btn-install", Button)
+            install_btn.label = "Install"
+            install_btn.variant = "success"
+            install_btn.disabled = False
+
+            self.query_one("#btn-sync-meta", Button).disabled = False
+            self.query_one("#btn-uninstall", Button).disabled = False
+
+        self.call_from_thread(restore_install_ui)
+
+    @work(thread=True)
+    def uninstall_roms(self, platform_id: str, rom_ids: list) -> None:
+        """Preserved local binary elimination cleanup operations handler."""
+        # TODO: This is incomplete. It works but probably fails the moment that there are multiple files to download
+        # (which means there are multiple files to remove)
+        platform_slug = self.platforms[platform_id].get("fs_slug")
+
+        for r_id in rom_ids:
+            fs_name = self.current_options.get(r_id)
+            if not fs_name:
+                continue
+
+            file_path = ROMS_DIR / platform_slug / fs_name
+            if file_path.exists():
+                try:
+                    file_path.unlink()
+                    self.call_from_thread(print, f"Wiped local binary deployment: [red]{fs_name}[/]")
+                except Exception as e:
+                    self.call_from_thread(print, f"[bold red]Failed to wipe {fs_name}: {e}[/]")
+
+        self.call_from_thread(self.populate_roms, platform_id)
 
     def _stop_button_(self, btn) -> None:
         self.abort_event.set()
@@ -780,6 +923,8 @@ class RommBridge(App):
         btn.label = "Stop"
         btn.variant = "warning"
 
+        self.query_one("#btn-install", Button).disabled = True
+        self.query_one("#btn-uninstall", Button).disabled = True
         sync_mode = self.query_one("#sync-mode-select", Select).value
 
         enabled_folders = set()
@@ -1094,6 +1239,8 @@ class RommBridge(App):
             sync_btn.label = "Sync Metadata"
             sync_btn.variant = "primary"
             sync_btn.disabled = False
+            self.query_one("#btn-install", Button).disabled = False
+            self.query_one("#btn-uninstall", Button).disabled = False
 
         self.call_from_thread(self.populate_roms, platform_id)
         self.call_from_thread(restore_sync_ui)
