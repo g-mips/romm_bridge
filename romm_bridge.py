@@ -14,6 +14,7 @@ import requests
 import json
 import asyncio
 import xml.etree.ElementTree as ET
+from xml.dom import minidom
 import threading
 from datetime import datetime
 import time
@@ -260,6 +261,7 @@ class RommBridge(App):
 
                 with Horizontal(classes="button-group"):
                     yield Button("Sync Metadata", id="btn-sync-meta", variant="primary")
+                    yield Button("Generate ES Systems", id="btn-gen-systems")
                     yield Button("Toggle All", id="btn-toggle-all")
                     yield Select(
                         options=[
@@ -364,7 +366,7 @@ class RommBridge(App):
                 self.log_msg(f"Gathering up to {limit} ROMs starting at offset {offset}")
 
                 params = {"limit": limit, "offset": offset}
-                res = requests.get(f"{self.romm_url}/api/roms", headers=self.headers, params=params, timeout=10)
+                res = requests.get(f"{self.romm_url}/api/roms", headers=self.headers, params=params, timeout=100)
                 res.raise_for_status()
 
                 items = res.json().get("items", [])
@@ -755,9 +757,6 @@ class RommBridge(App):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Centralized event routing framework supporting dynamic morphing action buttons."""
-        if not self.selected_platform:
-            return
-
         btn = event.button
 
         if str(btn.label) == "Stop":
@@ -765,7 +764,12 @@ class RommBridge(App):
         elif btn.id == "btn-sync-meta":
             self._sync_meta_data_button_(btn)
         elif btn.id == "btn-toggle-all":
+            if not self.selected_platform:
+                return
+
             self._toggle_all_button_()
+        elif btn.id == "btn-gen-systems":
+            self._generate_es_systems_xml_()
 
     def _stop_button_(self, btn) -> None:
         self.abort_event.set()
@@ -1157,6 +1161,93 @@ class RommBridge(App):
                 continue
             marker = "[bold green]✔[/]" if mass_selecting else "  "
             table.update_cell(row_key, "col_select", Text.from_markup(marker))
+
+    def _generate_es_systems_xml_(self) -> None:
+        """Dynamically builds ES-DE's es_systems.xml based on the server's platform list."""
+        if not self.platforms:
+            self.notify("Platforms not loaded from server yet!", severity="warning")
+            return
+
+        extension_map = {
+            "n3ds": ".3ds .cci .cxi .zip .7z",
+            "atari2600": ".a26 .bin .zip .7z",
+            "atari5200": ".a52 .bin .zip .7z",
+            "atari7800": ".a78 .bin .zip .7z",
+            "cdimono1": ".chd .cue .iso .zip .7z",
+            "dreamcast": ".chd .cdi .gdi .zip .7z",
+            "famicom": ".nes .zip .7z",
+            "gamegear": ".gg .zip .7z",
+            "gb": ".gb .zip .7z",
+            "gba": ".gba .zip .7z",
+            "gbc": ".gbc .zip .7z",
+            "gc": ".rvz .iso .gcm .gcz .ciso .zip .7z",
+            "genesis": ".md .smd .gen .bin .zip .7z",
+            "laserdisc": ".txt .zip .7z",
+            "mame": ".zip .7z",
+            "mastersystem": ".sms .bin .zip .7z",
+            "n64": ".z64 .n64 .v64 .zip .7z",
+            "naomi": ".bin .lst .dat .zip .7z .chd",
+            "nds": ".nds .zip .7z",
+            "neogeo": ".zip .7z",
+            "nes": ".nes .zip .7z",
+            "ps2": ".iso .bin .chd .cso .gz .zip .7z",
+            "psp": ".iso .cso .pbp .chd .zip .7z",
+            "psvita": ".vpk .zip .7z",
+            "psx": ".cue .chd .m3u .pbp .iso .zip .7z",
+            "psx.old": ".cue .chd .m3u .pbp .iso .zip .7z",
+            "saturn": ".cue .chd .m3u .iso .zip .7z",
+            "sega32x": ".32x .bin .zip .7z",
+            "snes": ".smc .sfc .fig .swc .zip .7z",
+            "tg16": ".pce .zip .7z",
+            "wii": ".rvz .wbfs .iso .nkit.iso .zip .7z",
+            "wiiu": ".wua .wud .wux .rpx .zip .7z",
+            "xbox": ".iso .xiso .xiso.iso .zip .7z"
+        }
+
+        root = ET.Element("systemList")
+
+        for platform_id, p_data in self.platforms.items():
+            fs_slug = p_data.get("fs_slug")
+            if not fs_slug:
+                continue
+
+            esde_name = self.transform_romm_name_to_esde_name(fs_slug)
+
+            system_node = ET.SubElement(root, "system")
+
+            ET.SubElement(system_node, "name").text = esde_name
+            ET.SubElement(system_node, "fullname").text = p_data.get("name") or fs_slug
+            ET.SubElement(system_node, "path").text = f"~/.local/share/romm_bridge/rom_list/{fs_slug}"
+            ET.SubElement(system_node, "extension").text = extension_map.get(esde_name, ".zip .7z")
+            ET.SubElement(system_node, "command").text = f"romm_start.sh {fs_slug} %ROM%"
+
+            platform_scrape = esde_name
+            if esde_name == "tg16": platform_scrape = "pcengine"
+            elif esde_name == "famicom": platform_scrape = "nes"
+            elif esde_name == "laserdisc": platform_scrape = "daphne"
+
+            ET.SubElement(system_node, "platform").text = platform_scrape
+            ET.SubElement(system_node, "theme").text = esde_name
+
+        # Format it to look pretty
+        xml_string = ET.tostring(root, 'utf-8')
+        parsed_xml = minidom.parseString(xml_string)
+        pretty_xml = '\n'.join([line for line in parsed_xml.toprettyxml(indent="    ").split('\n') if line.strip()])
+
+        # Save to Disk
+        target_dir = ES_DE_DIR / "custom_systems"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        file_path = target_dir / "es_systems.xml"
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(pretty_xml)
+
+            self.log_msg(f"[bold green]Successfully generated {file_path} for {len(self.platforms)} platforms![/]")
+            self.notify("es_systems.xml generated successfully!", severity="information")
+        except Exception as e:
+            self.log_msg(f"[bold red]Failed to write es_systems.xml: {e}[/]")
+            self.notify(f"Error saving XML: {e}", severity="error")
 
     @work(exclusive=True)
     async def stream_roms_to_table(self, platform_id: str, roms_data: list) -> None:
