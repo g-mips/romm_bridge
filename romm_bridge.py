@@ -1093,6 +1093,8 @@ class RommBridge(App):
 
                 if enabled_folders and es_folder not in enabled_folders:
                     self.dry_run_log_msg(f"  [dim]◯ Skipped[/] -> Folder {es_folder} was not enabled.")
+                    if not target_path.exists():
+                        missing_folders.append(es_folder)
                     continue
 
                 is_local_source = self.romm_url in target_url
@@ -1100,6 +1102,8 @@ class RommBridge(App):
                 if self.local_only and is_missing and not is_local_source:
                     if self.dry_run:
                         self.dry_run_log_msg(f"  [dim]◯ Skipped[/] -> External asset source for {friendly_name} blocked because it was external from ROMM server ({target_url}).")
+                    if not target_path.exists():
+                        missing_folders.append(es_folder)
                     continue
 
                 if self.dry_run:
@@ -1528,6 +1532,8 @@ class RommBridge(App):
                     filename = f"{true_stem}{ext}"
                     if not (es_media_dir / es_folder / filename).exists():
                         missing_folders.append(es_folder)
+                else:
+                    missing_folders.append(es_folder)
 
             self.missing_media_cache[rom_id] = list(missing_folders)
 
