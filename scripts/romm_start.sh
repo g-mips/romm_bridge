@@ -31,7 +31,7 @@ fi
 # Get the list of file IDs and their actual names from the ROMM search
 # NOTE: we use .items[0] assuming the first result is our best match
 # There is the chance that it isn't I suppose. But probably not.
-SEARCH_RESULT=$(curl -s -G --data-urlencode "platform_ids=${PLATFORM_ID}" --data-urlencode "search_term=${SEARCH_TERM}" \
+SEARCH_RESULT=$(curl -s -G --data-urlencode "platform_ids=${PLATFORM_ID}" --data-urlencode "search_term=${SEARCH_TERM}" --data-urlencode "with_files=true" \
     -H "Authorization: Bearer $API_KEY" \
     "${ROMM_URL}/api/roms" | jq -r '.items[0]')
 
